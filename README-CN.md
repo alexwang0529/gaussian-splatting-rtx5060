@@ -1,280 +1,87 @@
-# Gaussian Splatting 中文配置教程 · Windows / RTX 5060 Laptop
+# 3D Gaussian Splatting · Windows / RTX 5060 Laptop
 
-本文介绍在 Windows 上使用 RTX 5060 Laptop 复现 3D Gaussian Splatting 的环境配置方法，并说明本仓库对上游代码增加的适配与修复。教程从环境安装一直覆盖到视频抽帧、COLMAP、训练、渲染和指标评估，命令采用 PowerShell 语法。
+[English](README.md) · **简体中文**
 
-算法实现来自 GraphDeco-Inria。本教程依据官方 README 的流程整理，针对验证硬件补充 Python、PyTorch、CUDA 和编译器的版本组合，以及复现中实际遇到的问题。[官方项目](https://github.com/graphdeco-inria/gaussian-splatting)、[对应基线版本的官方 README](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/README.md)。
+本项目在 Windows 和 RTX 5060 Laptop GPU 上运行 GraphDeco 的 3D Gaussian Splatting 训练与渲染代码，提供编译器与 CUDA 配置，以及场景预处理、训练、评估、查看和点云导出脚本。请准备自己的图片或视频，并按下文安装对应外部工具。
 
-## 验证硬件
+## 相较 GraphDeco 官方仓库的改动
 
-| 项目 | 型号 |
-|---|---|
-| 电脑 | Lenovo Legion R7000P ADR10（83LT） |
-| 显卡 | NVIDIA GeForce RTX 5060 Laptop GPU，8GB 显存，计算能力 sm_120 |
+以下改动以 GraphDeco 的固定基线提交 `54c035f` 为参照。 [上游 README](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/README.md)
 
-下文记录的版本组合已在这台电脑上验证。其他硬件可以参考配置步骤，显卡计算能力、工具安装位置和训练显存需求应按实际设备调整。
+| 文件 | 改动与作用 |
+| --- | --- |
+| [`environment.windows-cu128.yml`](environment.windows-cu128.yml), [`requirements.windows.txt`](requirements.windows.txt), [`setup_windows.ps1`](setup_windows.ps1), [`scripts/verify_gpu.py`](scripts/verify_gpu.py) | 上游环境固定了 Python 3.7.13、PyTorch 1.12.1 和 CUDA 11.6。本项目使用 Python 3.10 与 PyTorch 2.7.1/cu128，加载 MSVC 14.38，为 `sm_120` 编译，并在 GPU 上验证 CUDA 扩展。 |
+| [`train_images.py`](train_images.py), [`train_video.py`](train_video.py), [`video_train_eval.py`](video_train_eval.py) | 新增图片训练、视频训练、视频到评估三个入口。脚本使用当前 Python 解释器，子进程失败时终止后续步骤。 |
+| [`convert.py`](convert.py), [`utils/local_tools.py`](utils/local_tools.py) | 支持查找项目内的外部工具和 `PATH` 中的可执行文件。在场景目录内以相对路径传递数据库和图片位置，适配含中文字符的 Windows 路径下的 COLMAP 3.8。 |
+| [`SIBR_viewer.py`](SIBR_viewer.py), [`SIBR_remote_viewer.py`](SIBR_remote_viewer.py), [`gaussian_renderer/network_gui.py`](gaussian_renderer/network_gui.py), [`train.py`](train.py) | 新增本地和实时查看器启动脚本。训练端读取完整 TCP 消息，以 UTF-8 字节长度发送路径，并报告断线错误。远程启动器可为旧版查看器提供 ASCII 相对场景路径。 |
+| [`scene/gaussian_model.py`](scene/gaussian_model.py) | 每批写入 65,536 个高斯点以降低保存 PLY 时的系统内存峰值，写入成功后再用临时文件替换目标。 |
+| [`metrics.py`](metrics.py) | 复用单个 VGG LPIPS 网络，关闭梯度计算，评估失败时返回非零退出码。PSNR、SSIM 和 LPIPS 沿用上游定义。 |
+| [`resize_images.py`](resize_images.py), [`export_point_cloud.py`](export_point_cloud.py) | 新增等比例缩图和图片采样，以及将高斯中心与近似 RGB 颜色导出为普通 PLY 点云的功能。 |
 
-## 与官方 README 教程的区别
+## Windows 配置教程
 
-比较依据为上方链接中的上游版本。官方的 `environment.yml`、作者测试过的 CUDA SDK 和可自定义环境的说明需要一起理解。
+### 1. 安装前置软件
 
-| 项目 | 官方默认配置或教程流程 | 本教程采用的方法 |
-|---|---|---|
-| Python / PyTorch | 环境文件使用 Python 3.7.13、PyTorch 1.12.1 | 使用 Python 3.10、PyTorch 2.7.1/cu128，适配验证显卡 |
-| CUDA | 环境文件使用 cudatoolkit 11.6，README 中作者使用的扩展编译 SDK 为 11.8 | PyTorch cu128 配合 CUDA Toolkit 12.8.1 编译扩展 |
-| Windows 编译器 | 作者使用 VS 2019，要求编译器与 CUDA 配套 | VS 2022，明确加载 MSVC 14.38 x64/x86 |
-| 环境创建 | `conda env create --file environment.yml` | 提供 `environment.windows-cu128.yml`、手动安装命令和 `setup_windows.ps1` |
-| 数据处理与评估 | 分别运行 `convert.py`、`train.py`、`render.py`、`metrics.py` | 增加视频全流程脚本，统一数据路径并检查每一步退出状态 |
-| 图片缓存 | `data_device` 默认使用 CUDA | 全流程脚本使用 CPU 缓存图片，模型继续在 GPU 上训练 |
-| Windows 中文路径 | 需要结合各工具的路径和编码行为处理 | 对编译文件、COLMAP 数据库路径和 SIBR 通信分别补充修复 |
-| 大模型 PLY 保存 | 保存函数先构造全部属性和 Python 元组列表 | 按每块 65536 个高斯点写入，降低保存时的内存峰值 |
+下列组合已在 Windows 上验证。准备支持子模块的 Git for Windows，并确保 PowerShell 中能使用 Conda。如需初始化，运行 `conda init powershell` 后重新打开终端。
 
-官方 README 也提供自定义环境的说明。这里记录的是针对上述电脑验证过的一条配置路线，其中扩展版本仍按仓库的子模块提交配套安装。
-
-## 解决的问题与实际优势
-
-- **新显卡环境适配。** 原先的 PyTorch 1.12.1/cu116 出现 `sm_120 is not compatible`。本教程给出可复用的 PyTorch/cu128、Toolkit 和 MSVC 组合，并提供实际 GPU 前向、反向运算检查。
-- **更容易完成 Windows 扩展编译。** 通过 PowerShell 明确选择工具集、目标架构和 UTF-8 编码，覆盖找不到 `cl`、选错编译器和中文路径下 Ninja 缓存编码等问题。
-- **更适合 8GB 显存下处理较多图片。** 图片缓存放入系统内存，减少输入数据常驻显存的占用。训练规模仍与图片分辨率、高斯点数量和渲染过程有关。
-- **减少重复操作与错误路径。** 全流程脚本集中设置视频、FPS、数据目录和模型目录。COLMAP 或训练失败时立即停止，方便修复后复用已完成的步骤。
-- **降低导出大模型时的额外内存开销。** 分块保存替代全量元组列表，已用 1407622 个点、约 333MiB 的模型验证输出逐字节一致。保存完成后再替换目标文件，减少中途写入失败损坏已有模型的风险。
-- **便于定位查看与评估问题。** 补充 SIBR 中文路径启动方式，评估脚本输出具体异常并复用 LPIPS 网络，便于识别权重下载和运行错误。
-
-以上改动集中在环境、文件读写、工具调用和流程衔接。训练优化目标与评价指标定义沿用上游实现。GPU 算子检查、独立视频短流程、测试图片指标计算和大模型保存一致性均已有验证记录。
-
-## 配置教程
-
-先确认以下软件版本组合。记录核对于 2026 年 11 月 16 日。
-
-| 组件 | 验证版本 |
-|---|---|
+| 组件 | 已验证配置 |
+| --- | --- |
+| 电脑 / 显卡 | Lenovo Legion R7000P ADR10 (83LT), NVIDIA GeForce RTX 5060 Laptop GPU (8 GB, `sm_120`) |
 | NVIDIA 驱动 | 592.01 |
-| Python | 3.10.22，Conda 环境 |
-| PyTorch | 2.7.1+cu128 |
-| torchvision | 0.22.1+cu128 |
-| CUDA Toolkit | 12.8 Update 1，nvcc V12.8.93 |
-| Visual Studio | VS 2022，验证时使用 Professional |
-| MSVC 工具集 | 14.38.33130，对应 cl 19.38.x |
-| NumPy | 1.26.4 |
-| OpenCV | opencv-python 4.11.0.86 |
-| 官方代码基线 | `54c035f7834b564019656c3e3fcc3646292f727d` |
+| Python | 3.10.22 (Conda) |
+| PyTorch / torchvision | 2.7.1+cu128 / 0.22.1+cu128 |
+| CUDA Toolkit | 12.8 Update 1 (`nvcc V12.8.93`) |
+| Windows 编译器 | Visual Studio 2022 / MSVC 14.38.33130 (`cl 19.38.x`) |
+| NumPy / OpenCV | 1.26.4 / 4.11.0.86 |
 
-本仓库为这组配置提供 `environment.windows-cu128.yml`。后面的步骤同时给出手动配置方式，方便定位安装问题。
+1. 在 Visual Studio Installer 中为 Visual Studio 2022 或 Build Tools 2022 选择 **使用 C++ 的桌面开发**。在 **单个组件** 中勾选 **MSVC v143 x64/x86 生成工具（v14.38–17.8）** 和一个 Windows 10 或 11 SDK。
+2. 安装适用于 Windows x86-64 的 CUDA Toolkit 12.8 Update 1。安装脚本默认从 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8` 查找工具包。
+3. 打开 PowerShell，运行 `nvidia-smi` 和 `nvcc --version`。前者显示驱动支持的 CUDA 版本，使用 `nvcc` 确认实际用于编译的 Toolkit 版本。
 
-完成第 1～4 步后，可以直接运行 `powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1` 安装并检查 CUDA 扩展，再继续第 8 步。需要手动编译或定位问题时，按第 5～7 步操作。自动配置脚本的 PowerShell 语法已检查，编译过程已通过手动等效命令验证。
+[Visual Studio](https://visualstudio.microsoft.com/vs/older-downloads/) · [MSVC / CUDA 12.8](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-installation-guide-microsoft-windows/index.html#system-requirements) · [CUDA Toolkit 12.8.1](https://developer.nvidia.com/cuda-12-8-1-download-archive) · [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) · [PyTorch 2.7.1](https://pytorch.org/get-started/previous-versions/#v271)
 
-### 1. 准备 Visual Studio 2022 编译工具
+### 2. 克隆仓库、创建环境并编译扩展
 
-安装 Visual Studio 2022 或 Build Tools 2022。在 Visual Studio Installer 中选择“使用 C++ 的桌面开发”，并在“单个组件”中安装以下组件。
-
-- `MSVC v143 - VS 2022 C++ x64/x86 生成工具 (v14.38–17.8)`。
-- 一个 Windows 10 或 Windows 11 SDK。
-
-`14.38` 是编译工具集版本，`17.8` 表示该工具集对应的 VS 2022 版本。整套 VS 可以更新到 17.14，同时保留 14.38 工具集。CUDA 12.8 的官方支持表列出了 VS 2022/MSVC 193x。[VS 历史版本入口](https://visualstudio.microsoft.com/vs/older-downloads/)、[CUDA Windows 编译器兼容表](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-installation-guide-microsoft-windows/index.html#system-requirements)。
-
-当电脑安装了多套 VS/MSVC 时，后面的命令会明确选择 14.38 工具集。
-
-### 2. 安装 CUDA Toolkit 12.8.1
-
-先完成 VS 组件安装，再运行 CUDA 安装程序。下载页选择 Windows、x86_64、对应的 Windows 版本和 `exe (local)`。[CUDA Toolkit 12.8.1 官方下载](https://developer.nvidia.com/cuda-12-8-1-download-archive)。
-
-验证时采用“自定义安装”，安装 CUDA 工具包组件。电脑已有合适的新版驱动时，可取消勾选 `Driver components`。遇到正在运行的 Visual Studio 提示时，保存工作并关闭 VS，再点击 Retry。
-
-默认工具包目录如下。
-
-```text
-C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
-```
-
-安装完成后新开 PowerShell，检查驱动和编译器。
+在 PowerShell 中运行以下命令。如果已有 `gaussian-splatting` 环境，激活后直接运行安装脚本。
 
 ```powershell
-nvidia-smi
-nvcc --version
+git clone --recurse-submodules https://github.com/alexwang0529/gaussian-splatting-rtx5060.git
+Set-Location .\gaussian-splatting-rtx5060
+conda env create -f .\environment.windows-cu128.yml
+conda activate gaussian-splatting
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 ```
 
-`nvcc` 应显示 `release 12.8`。如果终端还没有刷新 PATH，可直接验证安装文件。
+脚本加载 x64 MSVC 14.38 工具集，安装 cu128 版 PyTorch 和 Python 依赖，编译 `simple-knn`、`diff-gaussian-rasterization` 和 `fused-ssim`，并检查安装结果。若要指定某个环境，可用 `-Python` 传入 `python.exe` 的完整路径。
 
-```powershell
-& 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe' --version
-```
-
-`nvidia-smi` 中的 CUDA Version 表示驱动支持的 CUDA 版本上限。编译此项目所用的 Toolkit 版本由 `nvcc --version` 确认。
-
-### 3. 下载完整项目及子模块
-
-首次下载时，在希望存放项目的父目录打开 PowerShell。复制当前 GitHub 仓库页面 Code 菜单中的 HTTPS 地址，在提示时粘贴。
-
-```powershell
-$RepositoryUrl = Read-Host '粘贴当前仓库的 HTTPS 克隆地址'
-git clone --recursive $RepositoryUrl gaussian-splatting
-Set-Location .\gaussian-splatting
-```
-
-后续命令均在项目根目录执行。本文使用本仓库提供的 Windows 配置文件、辅助脚本和修复。
-
-验证时使用的上游代码和子模块提交如下。当前仓库的适配代码建立在这些版本之上。
-
-| 仓库 | 提交 |
-|---|---|
-| gaussian-splatting | `54c035f7834b564019656c3e3fcc3646292f727d` |
-| simple-knn | `86710c2d4b46680c02301765dd79e465819c8f19` |
-| diff-gaussian-rasterization | `9c5c2028f6fbee2be239bc4c9421ff894fe4fbe0` |
-| fused-ssim | `1272e21a282342e89537159e4bad508b19b34157` |
-| GLM | `5c46b9c07008ae65cb81ab79cd677ecc1934b903` |
-| SIBR_viewers | `d8856f60c5384cc1975439193bb627d77d917d77` |
-
-下载中断后，在项目根目录补齐子模块，并检查检出状态。
+如果克隆中断，在仓库根目录运行以下命令。Git 会检出项目记录的各子模块版本。
 
 ```powershell
 git submodule update --init --recursive
 git submodule status --recursive
 ```
 
-主仓库 ZIP 需要额外补齐各个子模块。递归克隆能够按主仓库记录的提交检出依赖。[官方仓库](https://github.com/graphdeco-inria/gaussian-splatting)。
+| 源码 | 提交 |
+| --- | --- |
+| GraphDeco 基线 | `54c035f7834b564019656c3e3fcc3646292f727d` |
+| simple-knn | `86710c2d4b46680c02301765dd79e465819c8f19` |
+| diff-gaussian-rasterization | `9c5c2028f6fbee2be239bc4c9421ff894fe4fbe0` |
+| fused-ssim | `1272e21a282342e89537159e4bad508b19b34157` |
+| GLM | `5c46b9c07008ae65cb81ab79cd677ecc1934b903` |
+| SIBR_viewers | `d8856f60c5384cc1975439193bb627d77d917d77` |
 
-如果 Git 报本地代理连接失败，先核对 Git 配置与代理软件实际监听端口。
+### 3. 验证安装
 
-```powershell
-git config --show-origin --get-regexp 'http.*proxy'
-```
-
-例如代理软件确实监听 7890 时，可以对单次克隆指定代理。该示例中的端口需按自己的代理配置修改，`$RepositoryUrl` 使用前面复制的当前仓库地址。
-
-```powershell
-git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 clone --recursive $RepositoryUrl gaussian-splatting
-```
-
-主仓库已经下载、子模块下载失败时，在项目内补下载即可。
-
-```powershell
-git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 submodule update --init --recursive --jobs 1
-```
-
-能够直连 GitHub 时，也可以对单次命令清空代理。
-
-```powershell
-git -c http.proxy= -c https.proxy= submodule update --init --recursive --jobs 1
-```
-
-### 4. 创建 Python 环境并安装 PyTorch
-
-先安装可在 PowerShell 中使用的 Conda，例如 [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main)。如果尚未初始化 PowerShell，执行 `conda init powershell` 后重新打开终端。
-
-从零配置时执行以下命令，环境统一命名为 `gaussian-splatting`。
-
-```powershell
-conda create -n gaussian-splatting python=3.10 pip -y
-conda activate gaussian-splatting
-python -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -r .\requirements.windows.txt
-```
-
-PyTorch 安装成功后，预期版本字符串为 `2.7.1+cu128`。上述 Windows/cu128 命令来自 PyTorch 官方历史版本说明。[PyTorch 2.7.1 安装说明](https://pytorch.org/get-started/previous-versions/#v271)。
-
-`requirements.windows.txt` 包含 NumPy、OpenCV、plyfile、Pillow、SciPy、tqdm、joblib、ninja、setuptools 和 wheel。本教程固定 NumPy 1.26.4、OpenCV 4.11.0.86，以保持这组依赖的兼容性。
-
-也可以使用仓库提供的 YAML 创建环境。
-
-```powershell
-conda env create -f .\environment.windows-cu128.yml
-conda activate gaussian-splatting
-```
-
-手动创建和 YAML 创建任选一种。已有可用环境时直接激活，继续验证或编译步骤。
-
-其他依赖的验证版本如下，供定位环境差异使用。
-
-| 包 | 验证环境版本 |
-|---|---|
-| plyfile | 1.1.3 |
-| SciPy | 1.15.3 |
-| Pillow | 12.3.0 |
-| tqdm | 4.70.1 |
-| joblib | 1.6.0 |
-| ninja | 1.13.2 |
-| setuptools | 84.2.1 |
-| wheel | 0.48.0 |
-
-### 5. 验证 PyTorch GPU 运算
-
-```powershell
-python -c "import sys,torch; print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(torch.cuda.get_device_name(0)); x=torch.randn(512,512,device='cuda'); print((x@x).mean().item()); torch.cuda.synchronize(); print('GPU OK')"
-```
-
-应输出当前环境的 Python 路径、`2.7.1+cu128`、`12.8`、RTX 5060 Laptop GPU，以及 `GPU OK`。
-
-### 6. 加载 MSVC 14.38 并编译三个 CUDA 扩展
-
-在已激活 `gaussian-splatting` 的同一个 PowerShell 中，通过 VS Installer 自带的 `vswhere` 查找安装目录。
-
-```powershell
-$VsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$VsPath = & $VsWhere -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64 -property installationPath | Select-Object -First 1
-if (-not $VsPath) { throw '请先安装 VS 2022 及 MSVC 14.38 x64/x86 组件' }
-Import-Module (Join-Path $VsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
-Enter-VsDevShell -VsInstallPath $VsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.38'
-cl
-```
-
-`cl` 应显示用于 x64 的 `19.38.x` 编译器。接着配置本终端的编译变量。
-
-```powershell
-$env:CUDA_HOME = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v12.8'
-$env:CUDA_PATH = $env:CUDA_HOME
-$env:Path = "$env:CUDA_HOME\bin;$env:Path"
-$env:PYTHONUTF8 = '1'
-$env:TORCH_CUDA_ARCH_LIST = '12.0'
-$env:DISTUTILS_USE_SDK = '1'
-$env:MAX_JOBS = '2'
-$env:VSLANG = '1033'
-```
-
-`12.0` 对应当前显卡的计算能力 `sm_120`。`PYTHONUTF8` 让 Python 以 UTF-8 生成编译文件，适配当前中文项目路径。`MAX_JOBS=2` 限制编译并行数量，降低编译时的内存压力。
-
-逐条执行，每条成功后再执行下一条。
-
-```powershell
-python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\simple-knn
-python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\diff-gaussian-rasterization
-python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\fused-ssim
-```
-
-`--no-build-isolation` 让编译过程使用当前环境中已安装的 PyTorch。CUDA 扩展需要与当前 Python、PyTorch、Toolkit 和显卡架构配套。
-
-如果之前生成过 GBK 编码的 `build.ninja`，切换 UTF-8 后读取旧缓存可能失败。可清理这三个自动生成的文件后重试编译。
-
-```powershell
-Remove-Item -LiteralPath '.\submodules\simple-knn\build\temp.win-amd64-cpython-310\Release\build.ninja' -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath '.\submodules\diff-gaussian-rasterization\build\temp.win-amd64-cpython-310\Release\build.ninja' -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath '.\submodules\fused-ssim\build\temp.win-amd64-cpython-310\Release\build.ninja' -ErrorAction SilentlyContinue
-```
-
-当前项目也提供了自动配置入口。它会定位名为 `gaussian-splatting` 的 Conda 环境、查找 VS 2022/MSVC 14.38、设置编译变量，并安装和验证扩展。
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
-```
-
-### 7. 验证扩展和依赖
+在已激活的环境中运行以下检查。GPU 脚本验证 KNN、fused SSIM、启用和关闭抗锯齿时的光栅化前向与反向计算，以及训练模块导入。预期输出 `ALL GPU CHECKS PASSED` 和 `No broken requirements found.`
 
 ```powershell
 python .\scripts\verify_gpu.py
 python -m pip check
 ```
 
-验证脚本会执行 KNN GPU 距离计算、fused SSIM 的前向与反向计算、渲染器的前向与反向计算，并检查抗锯齿开关和训练模块导入。预期最后出现 `ALL GPU CHECKS PASSED`，依赖检查输出 `No broken requirements found.`。
+### 4. 安装外部工具
 
-在 VS Code 中执行 `Python: Select Interpreter`，选择 `gaussian-splatting` 环境。可以在已激活的终端查询实际解释器位置。
-
-```powershell
-python -c "import sys; print(sys.executable)"
-```
-
-日常运行激活该环境即可。重新打开终端后，如果需要重新编译扩展，再执行第 6 步的编译环境加载命令。
-
-### 8. 准备本地外部工具
-
-为视频抽帧、COLMAP 预处理和可选的模型查看准备外部工具。获取工具后，按以下目录放置完整的二进制包及附属库。
+COLMAP 用于原始图片预处理，FFmpeg 供视频脚本抽帧，ImageMagick 供 `convert.py --resize` 使用，SIBR 提供两种查看器。请保留各工具配套的 DLL 和插件。脚本可从 `external/` 或 `PATH` 查找可执行文件。本项目验证使用的是 COLMAP 3.8 Windows CUDA 版。
 
 ```text
 external/
@@ -288,46 +95,138 @@ external/
    └─ SIBR_gaussianViewer_app.exe
 ```
 
-复制外部工具时需保留整个工具目录，包含 DLL、插件和资源。仓库中的 `utils/local_tools.py` 自动定位这些程序，运行 COLMAP 时设置其库目录和 Qt 插件路径。
+[COLMAP 3.8 CUDA](https://github.com/colmap/colmap/releases/tag/3.8) · [FFmpeg](https://ffmpeg.org/download.html#build-windows) · [ImageMagick](https://imagemagick.org/script/download.php#windows) · [SIBR](https://github.com/graphdeco-inria/gaussian-splatting#interactive-viewers)
 
-`external/` 已被 `.gitignore` 忽略，读者克隆本仓库后需要自行准备这些外部程序。目录名与 `utils/local_tools.py` 中的路径映射对应，更换目录结构时同时调整该映射。
+### 手动配置和编译扩展
 
-- COLMAP 采用已验证的 3.8 Windows CUDA 版本，保留 `bin`、`lib` 和插件目录。[COLMAP 3.8 下载](https://github.com/colmap/colmap/releases/tag/3.8)。
-- FFmpeg 可从官方页面列出的 Windows 预编译包获取，放置后确认存在 `external/ffmpeg/bin/ffmpeg.exe`。[FFmpeg 下载](https://ffmpeg.org/download.html#build-windows)。
-- ImageMagick 用于 `convert.py --resize`，按下载版本安装并核对 `magick.exe` 路径。[ImageMagick 下载](https://imagemagick.org/script/download.php#windows)。
-- SIBR 用于交互查看，可通过上游提供的 Windows 二进制包准备。预编译程序与最新源码的功能可能有差异。[官方查看器说明](https://github.com/graphdeco-inria/gaussian-splatting#interactive-viewers)。
+手动新建环境时，执行下列命令即可完成与 YAML 安装对应的准备工作。若已有 Conda 环境，从加载编译器的命令开始。
 
-工具可执行文件与其 DLL、插件、资源应保持配套。另行更换 COLMAP 版本时，需要核对 `convert.py` 使用的命令行选项。
-
-### 9. 训练、评估与模型查看
-
-环境配置完成后，请参阅[训练、评估与工具用法](README_LOCAL.zh-CN.md)，其中包含图片与视频训练、渲染评估、交互查看和普通点云导出的可运行示例。
-
-### 10. 常见问题与已实现的修复
-
-| 现象 | 原因与处理 |
-|---|---|
-| PowerShell 无法识别 `nvcc` | 确认 Toolkit 安装完成，新开终端，或用第 2 步的完整路径验证 |
-| `sm_120 is not compatible` | 核对解释器及 `torch.__version__`，使用本说明中的 Python 3.10、PyTorch 2.7.1/cu128 组合 |
-| 找不到 `cl` 或选中了 19.44/更高版本 | 用第 6 步明确加载 MSVC 14.38，确认 `cl` 显示 19.38.x |
-| Ninja 提示源文件不存在，但文件实际存在 | 检查中文路径的编译文件编码，设置 `PYTHONUTF8=1` 并清理旧 `build.ninja` |
-| `UnicodeDecodeError` 发生在读取 `build.ninja` | 清理旧编码缓存后重新编译 |
-| Git 无法连接本地代理端口 | 核对代理软件实际端口，示例使用 7890；按第 3 步对单次命令指定代理 |
-| SQLite `unable to open database file` | 本地 `convert.py` 在场景目录内传递相对数据库和图片路径，避开旧 COLMAP 对中文绝对路径的兼容问题 |
-| `Could not recognize scene type!` | 检查 `-s` 是否指向含 `images`、`sparse/0` 的具体场景目录 |
-| `Tensorboard not available` | 当前环境没有安装 TensorBoard，训练仍可继续；如需该日志功能可安装 `tensorboard` |
-| 训练后期突然变慢 | 检查显存和共享内存占用。验证中 502 张图片的实验通过 `--data_device cpu` 缓解图片缓存压力 |
-| 最后保存 PLY 时 `MemoryError` | 原保存代码会构造巨大的 Python 元组列表，本地已改成每块 65536 个点写入；百万点模型的输出一致性检查已通过 |
-| SIBR 连接后立即掉线 | 本地已修复训练端中文路径发送及 TCP 分包读取；修改后重启训练进程生效 |
-| SIBR 显示乱码路径并无法识别数据 | 使用 `python .\SIBR_remote_viewer.py -s .\data\example`，启动器会传递相对路径 |
-| LPIPS 下载 VGG16 权重时失败 | 首次评价需下载权重，检查下载网络和缓存完整性；验证过程中已补齐并校验 VGG16 权重，评估脚本会显示具体异常 |
-
-LPIPS 下载后的权重默认缓存在当前用户目录，可以在资源管理器地址栏输入以下路径。
-
-```text
-%USERPROFILE%\.cache\torch\hub\checkpoints\
-├─ vgg16-397923af.pth
-└─ vgg.pth
+```powershell
+conda create -n gaussian-splatting python=3.10 pip -y
+conda activate gaussian-splatting
+python -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r .\requirements.windows.txt
 ```
 
-保存修复已使用实际 1407622 个点、约 333MiB 的模型核对，输出与原写法逐字节一致。训练速度、峰值内存和最终指标取决于输入场景及训练参数。项目使用与分发遵循仓库中的 [LICENSE.md](LICENSE.md) 及相应依赖的许可证。
+在已激活环境的 PowerShell 中加载 MSVC 14.38 并设置编译变量。`cl` 应显示 x64 的 19.38.x。如使用自定义 Toolkit 安装目录，在此调整 `CUDA_HOME`。`TORCH_CUDA_ARCH_LIST=12.0` 对应已验证的 RTX 5060 Laptop GPU，`MAX_JOBS=2` 用于限制编译并行数。
+
+```powershell
+$VsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$VsPath = & $VsWhere -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64 -property installationPath | Select-Object -First 1
+if (-not $VsPath) { throw 'Install VS 2022 and MSVC 14.38 x64/x86.' }
+Import-Module (Join-Path $VsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+Enter-VsDevShell -VsInstallPath $VsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.38'
+cl
+
+$env:CUDA_HOME = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v12.8'
+$env:CUDA_PATH = $env:CUDA_HOME
+$env:Path = "$env:CUDA_HOME\bin;$env:Path"
+$env:PYTHONUTF8 = '1'
+$env:TORCH_CUDA_ARCH_LIST = '12.0'
+$env:DISTUTILS_USE_SDK = '1'
+$env:MAX_JOBS = '2'
+$env:VSLANG = '1033'
+```
+
+逐条安装。`--no-build-isolation` 让扩展编译使用当前环境中的 PyTorch。三个扩展安装完毕后，重新运行 GPU 和依赖检查。
+
+```powershell
+python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\simple-knn
+python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\diff-gaussian-rasterization
+python -m pip install --no-deps --no-build-isolation --no-cache-dir -v .\submodules\fused-ssim
+```
+
+## 训练与辅助工具
+
+激活 Conda 环境后，在仓库根目录运行以下示例。训练命令中的 `-s` 指向场景目录，`-m` 指向模型输出目录。默认训练 30,000 轮后，在模型目录下的 `point_cloud/iteration_30000/point_cloud.ply` 保存训练好的高斯模型。
+
+### 从图片或视频训练
+
+从照片训练时，将原始图片放入 `data/my_scene/input/`。从视频训练时，将视频放在 `data/my_video.mp4`，或通过 `--video` 指定路径。示例每秒抽取两帧。两个脚本都会将 `--iterations`、`--eval`、`-r` 等额外参数传给 `train.py`。
+
+```powershell
+python .\train_images.py -s .\data\my_scene -m .\output\my_scene
+python .\train_video.py --video .\data\my_video.mp4 -s .\data\video_scene -m .\output\video_scene --fps 2
+```
+
+- 用 `--skip_extraction` 复用已抽取的帧。若相同帧已完成 COLMAP 重建，再加 `--skip_conversion`。对于 `train_images.py`，可单独用 `--skip_conversion` 复用已完成的 COLMAP 场景。
+- 更换视频或抽帧频率时使用新的场景目录。视频脚本在抽帧前会检查已有的帧和重建结果。
+- `--no_gpu` 让 COLMAP 特征提取和匹配使用 CPU，训练仍使用 CUDA。对于 8 GB 显存，`-r 2 --data_device cpu` 可将输入宽高减半，并把图像缓存放在系统内存中。
+
+### 单独运行 COLMAP
+
+将原始图片放入场景的 `input/` 目录。转换脚本会将去畸变后的图片写入 `images/`，相机和稀疏点云模型写入 `sparse/0/`。加上 `--resize` 时，ImageMagick 还会生成 `images_2/`、`images_4/` 和 `images_8/`。`--colmap_executable` 和 `--magick_executable` 可指定自定义的可执行文件路径。
+
+```powershell
+python .\convert.py -s .\data\my_scene
+```
+
+### 训练、渲染和评估
+
+已有 COLMAP 场景时，在训练时加上 `--eval` 留出测试视角。之后渲染测试视角并计算 PSNR、SSIM 和 LPIPS。首次运行 LPIPS 需要下载 VGG16 和 LPIPS 权重。模型目录中的 `results.json` 记录场景平均指标，`per_view.json` 记录逐视角指标。
+
+```powershell
+python .\train.py -s .\data\my_scene -m .\output\my_scene_eval --eval
+python .\render.py -m .\output\my_scene_eval --skip_train
+python .\metrics.py -m .\output\my_scene_eval
+```
+
+### 从视频一键运行到评估
+
+编辑 `video_train_eval.py` 顶部的常量。用 `VIDEO_PATH` 和 `FPS` 设置输入，用 `DATA_DIR` 存放抽帧和 COLMAP 文件，用 `MODEL_DIR` 存放模型、渲染图和指标。用 `TRAIN_ITERATIONS`、`DATA_DEVICE`、`IMAGE_RESOLUTION` 设置训练参数。图片默认缓存在 CPU 内存中。脚本中的相对路径以仓库根目录为基准。
+
+首次运行时保持 `SKIP_EXTRACTION` 和 `SKIP_COLMAP` 为 `False`。用 `SKIP_EXTRACTION=True` 复用抽帧结果，再用 `SKIP_COLMAP=True` 复用这些帧的重建结果。流程依次运行 FFmpeg、COLMAP、带 `--eval` 的训练、测试视角渲染和三项指标计算。
+
+```powershell
+python .\video_train_eval.py
+```
+
+### 查看已保存模型或实时训练
+
+安装 SIBR 后，将包含 `point_cloud/` 的模型目录传给 `SIBR_viewer.py`。要实时查看训练，启动训练时启用查看器，然后另开一个 PowerShell，将同一场景传给 `SIBR_remote_viewer.py`。默认地址是 `127.0.0.1:6009`。更改时请在训练端和查看端使用一致的 `--ip` 与 `--port`。使用旧版 Windows 查看器时，请将场景放在项目下的 ASCII 路径中。
+
+```powershell
+python .\SIBR_viewer.py -m .\output\my_scene_eval
+python .\SIBR_remote_viewer.py -s .\data\my_scene
+```
+
+### 调整输入图片大小
+
+`resize_images.py` 会保持宽高比，并将结果写入另一个目录。可用 `--height` 限制高度，或用 `--skip 2` 按文件名排序每隔一张取一张。对缩放后的图片集重新运行 COLMAP。
+
+```powershell
+python .\resize_images.py -s .\data\my_scene\input -o .\data\my_scene_small\input --width 1280
+```
+
+### 导出普通 RGB PLY 点云
+
+`export_point_cloud.py` 将训练好的高斯 PLY 转为普通 XYZ/RGB 点云，使用零阶球谐系数近似颜色。输出只包含点中心和颜色，可供点云软件使用。加上 `--ascii` 可输出文本 PLY。
+
+```powershell
+python .\export_point_cloud.py -i .\output\my_scene_eval\point_cloud\iteration_30000\point_cloud.ply -o .\output\my_scene_eval\point_cloud_rgb.ply
+```
+
+## 常见问题
+
+| 现象 | 排查方式 |
+| --- | --- |
+| 找不到 `nvcc` | 重新打开 PowerShell，或直接检查 Toolkit 的 `bin\nvcc.exe`，确认显示 12.8。 |
+| `sm_120 is not compatible` | 核对当前 Python 解释器与 `torch.__version__`，已验证的 PyTorch 版本显示 `2.7.1+cu128`。 |
+| 找不到 `cl` 或版本不符 | 按手动编译命令加载 MSVC 14.38，确认显示 x64 和 `19.38.x`。 |
+| Ninja 找不到含非 ASCII 字符路径下的源码，或出现 `UnicodeDecodeError` | 设置 `PYTHONUTF8=1`，重编译前移除对应扩展生成的 `build/temp.win-amd64-cpython-310/Release/build.ninja`。安装脚本会清理各扩展的这个文件。 |
+| 子模块下载中断 | 用 `git config --show-origin --get-regexp 'http.*proxy'` 核对 Git 网络和代理设置，再重新运行递归子模块更新。 |
+| COLMAP 提示 `unable to open database file` | 运行本仓库的 `convert.py`，它会给 COLMAP 3.8 传入相对场景路径。确认场景目录可写。 |
+| `Could not recognize scene type!` | 对于 COLMAP 场景，确认 `-s` 指向包含 `images/` 和 `sparse/0/` 的目录。 |
+| 图像缓存占用过多显存 | 使用 `--data_device cpu`，或使用 `-r 2` 降低输入分辨率。 |
+| SIBR 断线或显示乱码场景路径 | 用本仓库的 `train.py` 重启训练，并用远程启动器传入 ASCII 相对场景路径。 |
+| 首次 LPIPS 评估下载权重失败 | 检查网络和 PyTorch Hub 缓存中的 VGG16 与 LPIPS 权重文件。Windows 上默认缓存目录为 `%USERPROFILE%\.cache\torch\hub\checkpoints`。 |
+
+## 验证记录
+
+已验证 CUDA 扩展、从视频到短轮训练的流程，以及留出测试图片的评估。还使用一个包含 1,407,622 个高斯点、约 333 MiB 的模型对比分块保存和原 PLY 写入实现，两者输出逐字节一致。
+
+## 作者与许可证
+
+参考实现由 Bernhard Kerbl、Georgios Kopanas、Thomas Leimkühler 和 George Drettakis 提供。在研究中使用 3D Gaussian Splatting 时，请引用其发表于 2023 年 ACM Transactions on Graphics 的论文。 [论文与引用信息](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) · [GraphDeco 源码](https://github.com/graphdeco-inria/gaussian-splatting)
+
+GraphDeco 许可证将使用范围限定为非商业研究与评估。依赖各自附有许可证。 [Gaussian Splatting 许可证](LICENSE.md) · [LPIPS 许可证](lpipsPyTorch/LICENSE)
