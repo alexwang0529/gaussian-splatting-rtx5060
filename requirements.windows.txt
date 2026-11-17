@@ -1,0 +1,10 @@
+numpy==1.26.4
+opencv-python==4.11.0.86
+plyfile
+tqdm
+pillow
+scipy
+joblib
+ninja
+setuptools
+wheel
